@@ -29,6 +29,13 @@
     "linux": {
       "icon": "build/icon.png",
       "target": ["AppImage"]
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "target": ["dmg", "zip"],
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     }
   },
   "dependencies": {
