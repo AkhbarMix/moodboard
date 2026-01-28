@@ -2,9 +2,9 @@ name: Build (Electron)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-22.04]
 
     runs-on: ${{ matrix.os }}
 
@@ -28,6 +28,30 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-0 \
+            libnss3 \
+            libxss1 \
+            libasound2 \
+            libgbm1 \
+            libxshmfence1 \
+            libdrm2 \
+            libglib2.0-0 \
+            libfuse2 \
+            icnsutils \
+            graphicsmagick \
+            xz-utils
+
+      - name: Ensure electron-builder helpers are executable
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x node_modules/app-builder-bin/linux/x64/app-builder || true
+          chmod +x node_modules/app-builder-bin/linux/x64/* || true
 
       - name: Build
         run: npm run dist
