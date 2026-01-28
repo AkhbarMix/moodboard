@@ -15,7 +15,8 @@ interface Props {
 export const CanvasItemComp: React.FC<Props> = ({ item, isSelected, onMouseDown, onUpdate, onDelete, onAddReaction, scale }) => {
   const [isEditing, setIsEditing] = useState(false);
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
-  
+    const [imgSrc, setImgSrc] = useState<string>("");
+
   // Auto-focus text area when entering edit mode
   useEffect(() => {
     if (isEditing && textAreaRef.current) {
@@ -25,10 +26,47 @@ export const CanvasItemComp: React.FC<Props> = ({ item, isSelected, onMouseDown,
 
   // If created empty (e.g. from toolbar), start editing immediately
   useEffect(() => {
-    if (item.type === 'text' && !item.content && isSelected && !isEditing) {
-        setIsEditing(true);
+  if (item.type !== "image") return;
+  if (!item.content) {
+    setImgSrc("");
+    return;
+  }
+
+  // 1) If content is already a data URL, just use it directly
+  if (item.content.startsWith("data:image/")) {
+    setImgSrc(item.content);
+    return;
+  }
+
+  // 2) Otherwise, treat it as a file path and load it via preload IPC
+  let alive = true;
+
+  (async () => {
+    try {
+      const absPath = item.content;
+
+      // If preload isn't available, fail gracefully
+      if (!window.moodboard?.readImageDataUrl) {
+        console.error("Preload API missing: window.moodboard.readImageDataUrl");
+        if (alive) setImgSrc("");
+        return;
+      }
+
+      const allowedRoot = absPath.split("\\MoodBoard\\")[0] + "\\MoodBoard";
+
+      const dataUrl = await window.moodboard.readImageDataUrl(absPath, allowedRoot);
+
+      if (alive) setImgSrc(String(dataUrl));
+    } catch (err) {
+      console.error("Failed to load image:", item.content, err);
+      if (alive) setImgSrc("");
     }
-  }, [item.id]); // Run once on mount/creation
+  })();
+
+  return () => {
+    alive = false;
+  };
+}, [item.id, item.type, item.content]);
 
   const handleContentChange = (val: string) => {
     onUpdate(item.id, { content: val });
@@ -191,7 +229,7 @@ export const CanvasItemComp: React.FC<Props> = ({ item, isSelected, onMouseDown,
           <div className="w-full h-full relative group/img">
             {item.content ? (
               <img 
-                src={item.content} 
+                src={imgSrc} 
                 alt="moodboard" 
                 className="w-full h-full object-cover pointer-events-none select-none"
               />
