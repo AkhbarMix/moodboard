@@ -203,7 +203,7 @@ const userId = user?.uid || null;
   const handleImportProject = async () => {
       if (window.moodboard) {
           try {
-              const metadata = await window.moodboard.importProject();
+              const metadata = await window.moodboard.importProject(userId);
               if (metadata) {
                   handleOpenProject(metadata.id);
               }
@@ -1080,6 +1080,7 @@ const userId = user?.uid || null;
                                     });
                                 }}
                                 scale={state.scale}
+                                projectPath={currentProject?.path || ""}
                             />
                         ))}
 

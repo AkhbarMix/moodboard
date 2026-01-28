@@ -1,11 +1,10 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, protocol } from "electron";
-import path from "path";
 import fs from "fs/promises";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
+import path from "path";
 import os from "os";
 import AdmZip from "adm-zip";
 import { v4 as uuidv4 } from "uuid";
-import { Buffer } from "buffer";
+import { app, BrowserWindow, ipcMain, dialog, shell, protocol } from "electron";
 import http from "http";
 import { URL } from "url";
 
@@ -53,6 +52,29 @@ function sanitizeFolderName(input: string) {
 function getUserProjectsDir(uid: string) {
   const safeUid = sanitizeFolderName(uid);
   return path.join(APP_DIR, "users", safeUid, "projects");
+}
+
+/**
+ * ✅ FIX: Normalize both file:// URLs and regular paths to absolute filesystem paths
+ * This fixes the "Blocked path (outside allowed root)" error in packaged builds
+ */
+function normalizeAbsPath(p: string) {
+  let out = String(p || "");
+
+  // Convert file:// URL to real path
+  if (out.startsWith("file://")) {
+    // Remove file:// or file:/// prefix
+    out = decodeURIComponent(out.replace(/^file:\/+/, ""));
+
+    // On Windows, the URL format is file:///C:/path
+    // After removing file:///, we get C:/path
+    // Convert forward slashes to backslashes for Windows
+    if (process.platform === "win32") {
+      out = out.replace(/\//g, "\\");
+    }
+  }
+
+  return path.resolve(out);
 }
 
 async function getRecents(): Promise<ProjectMetadata[]> {
@@ -105,6 +127,41 @@ ipcMain.handle("project:list-recent", async (_, uid?: string) => {
   if (!uid) return existingRecents;
   return existingRecents.filter((r) => r.uid === uid);
 });
+
+/**
+ * ✅ FIXED: Properly handles file:// URLs by normalizing them before security check
+ * This was the root cause of "Blocked path (outside allowed root)" errors
+ */
+ipcMain.handle(
+  "assets:readDataUrl",
+  async (_event, args: { absPath: string; allowedRoot: string }) => {
+    const { absPath, allowedRoot } = args;
+
+    // ✅ FIX: Use the updated normalizeAbsPath that handles file:// URLs
+    const normalizedRoot = normalizeAbsPath(allowedRoot);
+    const normalizedPath = normalizeAbsPath(absPath);
+
+    const inside =
+      normalizedPath === normalizedRoot ||
+      normalizedPath.startsWith(normalizedRoot + path.sep);
+
+    if (!inside) {
+      console.error("Security check failed:", {
+        absPath,
+        allowedRoot,
+        normalizedPath,
+        normalizedRoot,
+      });
+      throw new Error("Blocked path (outside allowed root)");
+    }
+
+    const buf = await fs.readFile(normalizedPath);
+    const mime = getMimeFromExt(path.extname(normalizedPath));
+    const base64 = buf.toString("base64");
+
+    return `data:${mime};base64,${base64}`;
+  }
+);
 
 /**
  * ✅ IMPORTANT:
@@ -211,11 +268,19 @@ ipcMain.handle("project:load", async (_, id: string) => {
   const rawData = await fs.readFile(jsonPath, "utf-8");
   const state = JSON.parse(rawData);
 
+  // ✅ FIX: Use proper Windows file URL format (file:/// with 3 slashes)
   // Convert "assets/" paths to absolute "file://" paths for the renderer
   state.items = state.items.map((item: any) => {
     if (item.type === "image" && item.content && typeof item.content === "string" && item.content.startsWith("assets/")) {
       const absolutePath = path.join(projectPath, item.content);
-      return { ...item, content: `file://${absolutePath.replace(/\\/g, "/")}` };
+      
+      // ✅ IMPORTANT: On Windows, use file:/// (3 slashes) format
+      // file:///C:/Users/... is the correct format
+      const fileUrl = process.platform === "win32"
+        ? `file:///${absolutePath.replace(/\\/g, "/")}`
+        : `file://${absolutePath}`;
+      
+      return { ...item, content: fileUrl };
     }
     return item;
   });
@@ -256,10 +321,17 @@ ipcMain.handle("project:export", async (_, id: string) => {
 
   if (!filePath) return false;
 
-  const zip = new AdmZip();
-  zip.addLocalFolder(project.path);
-  zip.writeZip(filePath);
-  return true;
+const zip = new AdmZip();
+
+// Put the folder contents at the ZIP root
+zip.addLocalFolder(project.path, "");
+
+// Create the zip in-memory then write as binary
+const buffer = zip.toBuffer();
+writeFileSync(filePath, buffer);
+
+return true;
+
 });
 
 /**
@@ -358,6 +430,17 @@ async function startRendererServer(distDir: string): Promise<number> {
       else reject(new Error("Could not get port"));
     });
   });
+}
+function getMimeFromExt(ext: string) {
+  switch (ext.toLowerCase()) {
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".webp": return "image/webp";
+    case ".gif": return "image/gif";
+    case ".svg": return "image/svg+xml";
+    default: return "application/octet-stream";
+  }
 }
 
 async function createWindow() {

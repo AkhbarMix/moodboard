@@ -10,12 +10,13 @@ interface Props {
   onDelete: (id: string) => void;
   onAddReaction: (id: string, event: React.MouseEvent) => void;
   scale: number;
+  projectPath: string; // ✅ Added: needed for resolving image paths
 }
 
-export const CanvasItemComp: React.FC<Props> = ({ item, isSelected, onMouseDown, onUpdate, onDelete, onAddReaction, scale }) => {
+export const CanvasItemComp: React.FC<Props> = ({ item, isSelected, onMouseDown, onUpdate, onDelete, onAddReaction, scale, projectPath }) => {
   const [isEditing, setIsEditing] = useState(false);
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
-    const [imgSrc, setImgSrc] = useState<string>("");
+  const [imgSrc, setImgSrc] = useState<string>("");
 
   // Auto-focus text area when entering edit mode
   useEffect(() => {
@@ -24,41 +25,68 @@ export const CanvasItemComp: React.FC<Props> = ({ item, isSelected, onMouseDown,
     }
   }, [isEditing]);
 
-  // If created empty (e.g. from toolbar), start editing immediately
+  // ✅ FIXED: Improved image loading with better file:// URL handling
   useEffect(() => {
   if (item.type !== "image") return;
-  if (!item.content) {
+
+  const content = item.content || "";
+  if (!content) {
     setImgSrc("");
     return;
   }
 
-  // 1) If content is already a data URL, just use it directly
-  if (item.content.startsWith("data:image/")) {
-    setImgSrc(item.content);
+  // If already a data URL, use it directly
+  if (content.startsWith("data:image/")) {
+    setImgSrc(content);
     return;
   }
 
-  // 2) Otherwise, treat it as a file path and load it via preload IPC
   let alive = true;
 
   (async () => {
     try {
-      const absPath = item.content;
+      let absPath = content;
 
-      // If preload isn't available, fail gracefully
-      if (!window.moodboard?.readImageDataUrl) {
-        console.error("Preload API missing: window.moodboard.readImageDataUrl");
-        if (alive) setImgSrc("");
-        return;
+      // ✅ FIX: Handle file:// URLs - convert to absolute path
+      if (absPath.startsWith("file://")) {
+        // Remove file:// or file:/// prefix and decode URI components
+        absPath = decodeURIComponent(absPath.replace(/^file:\/+/, ""));
+        
+        // On Windows, convert forward slashes to backslashes
+        if (navigator.platform.toLowerCase().includes('win')) {
+          absPath = absPath.replace(/\//g, "\\");
+        }
+      }
+      // ✅ FIX: Handle relative paths like "assets/xxx.png"
+      else if (!absPath.match(/^[a-zA-Z]:\\/)) {
+        // Check if projectPath is provided and valid
+        if (!projectPath) {
+          console.error("projectPath not provided to CanvasItemComp");
+          if (alive) setImgSrc("");
+          return;
+        }
+        
+        // Use the helper if available, otherwise manually join
+        if (window.moodboard?.pathJoin) {
+          absPath = window.moodboard.pathJoin(projectPath, absPath);
+        } else {
+          // Manual path joining for Windows
+          absPath = projectPath + (projectPath.endsWith("\\") ? "" : "\\") + absPath.replace(/\//g, "\\");
+        }
       }
 
-      const allowedRoot = absPath.split("\\MoodBoard\\")[0] + "\\MoodBoard";
+      // ✅ CRITICAL: The allowedRoot must match exactly what main.ts expects
+      // It should be the project folder path, not including the "assets" subfolder
+      const allowedRoot = projectPath;
 
+      console.log("Loading image:", { content, absPath, allowedRoot });
+
+      // Request the image as a data URL from the main process
       const dataUrl = await window.moodboard.readImageDataUrl(absPath, allowedRoot);
 
       if (alive) setImgSrc(String(dataUrl));
     } catch (err) {
-      console.error("Failed to load image:", item.content, err);
+      console.error("Failed to load image:", content, err);
       if (alive) setImgSrc("");
     }
   })();
@@ -66,7 +94,8 @@ export const CanvasItemComp: React.FC<Props> = ({ item, isSelected, onMouseDown,
   return () => {
     alive = false;
   };
-}, [item.id, item.type, item.content]);
+}, [item.id, item.type, item.content, projectPath]);
+
 
   const handleContentChange = (val: string) => {
     onUpdate(item.id, { content: val });
@@ -195,18 +224,20 @@ export const CanvasItemComp: React.FC<Props> = ({ item, isSelected, onMouseDown,
             fontSize: Math.max(14, item.width / 10) + 'px',
             fontWeight: item.fontWeight || '400',
             fontStyle: item.fontStyle || 'normal',
+            textAlign: 'left' as const,
+            lineHeight: 1.6,
         };
 
         return (
-            <div className="flex-1 w-full h-full p-4 overflow-hidden relative" style={{ cursor: isEditing ? 'text' : 'grab' }}>
+            <div className="w-full h-full p-4 overflow-hidden">
                 {isEditing ? (
                     <textarea
                         ref={textAreaRef}
-                        className="w-full h-full resize-none outline-none bg-transparent leading-relaxed"
                         value={item.content || ''}
                         onChange={(e) => handleContentChange(e.target.value)}
                         onBlur={() => setIsEditing(false)}
-                        onKeyDown={(e) => { e.stopPropagation(); }} 
+                        onKeyDown={(e) => e.stopPropagation()} 
+                        className="w-full h-full bg-transparent border-none outline-none resize-none leading-relaxed"
                         style={fontStyle}
                         dir="auto"
                     />
