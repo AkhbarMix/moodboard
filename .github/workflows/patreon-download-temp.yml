@@ -1,0 +1,162 @@
+name: Temporary Patreon Video Download
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patreon-download-temp.yml'
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install downloader dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade yt-dlp curl_cffi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Download public Patreon Quip
+        shell: bash
+        run: |
+          mkdir -p downloads
+          set +e
+          yt-dlp --version | tee downloads/yt-dlp-version.txt
+
+          echo '=== Attempt 1: direct Patreon extractor with Chrome impersonation ===' | tee downloads/attempt1.log
+          yt-dlp -v \
+            --impersonate chrome \
+            --referer 'https://www.patreon.com/' \
+            --merge-output-format mp4 \
+            -o 'downloads/Mix3D_Patreon_Quip_171352714.%(ext)s' \
+            'https://www.patreon.com/posts/171352714' \
+            2>&1 | tee -a downloads/attempt1.log
+          s1=${PIPESTATUS[0]}
+
+          if ! find downloads -maxdepth 1 -type f \( -name '*.mp4' -o -name '*.mkv' -o -name '*.webm' -o -name '*.mov' \) | grep -q .; then
+            echo '=== Attempt 2: custom domain with generic impersonation ===' | tee downloads/attempt2.log
+            yt-dlp -v \
+              --impersonate chrome \
+              --extractor-args 'generic:impersonate' \
+              --referer 'https://mix3ddesign.com/' \
+              --merge-output-format mp4 \
+              -o 'downloads/Mix3D_Patreon_Quip_171352714.%(ext)s' \
+              'https://mix3ddesign.com/posts/171352714' \
+              2>&1 | tee -a downloads/attempt2.log
+            s2=${PIPESTATUS[0]}
+          else
+            s2=0
+          fi
+
+          if ! find downloads -maxdepth 1 -type f \( -name '*.mp4' -o -name '*.mkv' -o -name '*.webm' -o -name '*.mov' \) | grep -q .; then
+            echo '=== Attempt 3: Patreon API via curl_cffi, then direct media/HLS ===' | tee downloads/attempt3.log
+            cat > /tmp/patreon_api.py <<'PY'
+          import json, os, re, subprocess, sys
+          from urllib.parse import urlencode
+          from curl_cffi import requests
+
+          post_id = '171352714'
+          base = f'https://www.patreon.com/api/posts/{post_id}'
+          params = {
+              'fields[media]': 'download_url,mimetype,size_bytes,file_name,display,media_type',
+              'fields[post]': 'comment_count,content,content_teaser_text,cleaned_teaser_text,embed,image,like_count,post_file,published_at,title,current_user_can_view',
+              'fields[user]': 'full_name,url',
+              'fields[post_tag]': 'value',
+              'fields[campaign]': 'url,name,patron_count',
+              'json-api-use-default-includes': 'false',
+              'include': 'audio,user,user_defined_tags,campaign,attachments_media',
+              'json-api-version': '1.0',
+          }
+          url = base + '?' + urlencode(params)
+          headers = {'Referer': 'https://www.patreon.com/', 'Accept': 'application/json'}
+          r = requests.get(url, headers=headers, impersonate='chrome', timeout=60)
+          print('API status:', r.status_code)
+          print('Content-Type:', r.headers.get('content-type'))
+          open('downloads/patreon_api_response.txt','wb').write(r.content)
+          if r.status_code != 200:
+              sys.exit(2)
+          data = r.json()
+          attrs = data.get('data', {}).get('attributes', {}) or {}
+          candidates = []
+          pf = attrs.get('post_file') or {}
+          if isinstance(pf, dict) and pf.get('url'):
+              candidates.append(('post_file', pf.get('url'), pf.get('name')))
+          for item in data.get('included') or []:
+              if item.get('type') == 'media':
+                  a = item.get('attributes') or {}
+                  if a.get('download_url'):
+                      candidates.append(('media_download', a.get('download_url'), a.get('file_name')))
+                  display = a.get('display') or {}
+                  for key in ('viewer_playback_data',):
+                      d = display.get(key) or {}
+                      if isinstance(d, dict) and d.get('url'):
+                          candidates.append(('media_playback', d.get('url'), a.get('file_name')))
+                  if display.get('url'):
+                      candidates.append(('media_display', display.get('url'), a.get('file_name')))
+          content = attrs.get('content') or ''
+          media_ids = re.findall(r'data-media-id=["\'](\d+)', content)
+          for mid in media_ids:
+              mr = requests.get(f'https://www.patreon.com/api/media/{mid}', headers=headers, impersonate='chrome', timeout=60)
+              open(f'downloads/media_{mid}.json','wb').write(mr.content)
+              if mr.status_code == 200:
+                  ma = mr.json().get('data',{}).get('attributes',{}) or {}
+                  if ma.get('download_url'):
+                      candidates.append((f'media_{mid}_download', ma.get('download_url'), ma.get('file_name')))
+                  display = ma.get('display') or {}
+                  for obj in (display, display.get('viewer_playback_data') or {}):
+                      if isinstance(obj, dict) and obj.get('url'):
+                          candidates.append((f'media_{mid}_playback', obj.get('url'), ma.get('file_name')))
+          print('Candidates:', json.dumps(candidates, indent=2))
+          open('downloads/candidates.json','w').write(json.dumps(candidates, indent=2))
+          for kind, media_url, name in candidates:
+              if not media_url:
+                  continue
+              out = 'downloads/Mix3D_Patreon_Quip_171352714.mp4'
+              try:
+                  if '.m3u8' in media_url or 'm3u8' in (name or '').lower():
+                      cp = subprocess.run(['ffmpeg','-y','-headers','Referer: https://www.patreon.com/\r\n','-i',media_url,'-c','copy',out], timeout=600)
+                      if cp.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 10000:
+                          print('Downloaded HLS:', kind)
+                          sys.exit(0)
+                  else:
+                      rr = requests.get(media_url, headers=headers, impersonate='chrome', timeout=120)
+                      print(kind, rr.status_code, rr.headers.get('content-type'), len(rr.content))
+                      if rr.status_code == 200 and len(rr.content) > 10000:
+                          open(out,'wb').write(rr.content)
+                          print('Downloaded direct:', kind)
+                          sys.exit(0)
+              except Exception as e:
+                  print('candidate failed', kind, repr(e))
+          sys.exit(3)
+          PY
+            python /tmp/patreon_api.py 2>&1 | tee -a downloads/attempt3.log
+            s3=${PIPESTATUS[0]}
+          else
+            s3=0
+          fi
+
+          echo "attempt statuses: $s1 $s2 $s3" | tee downloads/status.txt
+          echo 'Files:' | tee -a downloads/status.txt
+          find downloads -maxdepth 1 -type f -printf '%f %s bytes\n' | tee -a downloads/status.txt
+
+          if find downloads -maxdepth 1 -type f \( -name '*.mp4' -o -name '*.mkv' -o -name '*.webm' -o -name '*.mov' \) -size +10k | grep -q .; then
+            exit 0
+          fi
+          exit 1
+
+      - name: Upload result and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patreon-quip-171352714
+          path: downloads/
+          if-no-files-found: warn
+          retention-days: 1
