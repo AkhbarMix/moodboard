@@ -1,0 +1,150 @@
+name: Temporary YouTube Cobalt Download
+
+on:
+  push:
+    paths:
+      - '.github/workflows/youtube-cobalt-download-temp.yml'
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start local Cobalt API and resolve YouTube
+        shell: bash
+        run: |
+          mkdir -p downloads
+          URL='https://www.youtube.com/watch?v=GkdzNxLOnYI'
+          OUT='downloads/Mix3D_Stylized_VFX_Livestream_Part1.mp4'
+          set +e
+
+          try_cobalt() {
+            CLIENT="$1"
+            NAME="$2"
+            docker rm -f cobalt >/dev/null 2>&1 || true
+            echo "=== Starting Cobalt client=$CLIENT ===" | tee "downloads/${NAME}-server.log"
+            if [ -n "$CLIENT" ]; then
+              docker run -d --name cobalt \
+                -p 127.0.0.1:9000:9000 \
+                -e API_URL='http://127.0.0.1:9000/' \
+                -e DURATION_LIMIT='18000' \
+                -e ENABLE_DEPRECATED_YOUTUBE_HLS='always' \
+                -e CUSTOM_INNERTUBE_CLIENT="$CLIENT" \
+                ghcr.io/imputnet/cobalt:11 >> "downloads/${NAME}-server.log" 2>&1
+            else
+              docker run -d --name cobalt \
+                -p 127.0.0.1:9000:9000 \
+                -e API_URL='http://127.0.0.1:9000/' \
+                -e DURATION_LIMIT='18000' \
+                -e ENABLE_DEPRECATED_YOUTUBE_HLS='always' \
+                ghcr.io/imputnet/cobalt:11 >> "downloads/${NAME}-server.log" 2>&1
+            fi
+
+            for i in $(seq 1 30); do
+              curl -fsS http://127.0.0.1:9000/ > "downloads/${NAME}-info.json" && break
+              sleep 2
+            done
+            cat "downloads/${NAME}-info.json" || true
+
+            for QUALITY in 1080 720; do
+              for HLS in false true; do
+                echo "=== Resolve $NAME q=$QUALITY hls=$HLS ===" | tee -a "downloads/${NAME}-resolve.log"
+                RESP=$(curl -sS -m 90 -X POST 'http://127.0.0.1:9000/' \
+                  -H 'Accept: application/json' \
+                  -H 'Content-Type: application/json' \
+                  --data-binary "{\"url\":\"$URL\",\"videoQuality\":\"$QUALITY\",\"youtubeVideoCodec\":\"h264\",\"youtubeVideoContainer\":\"mp4\",\"downloadMode\":\"auto\",\"alwaysProxy\":true,\"youtubeHLS\":$HLS}")
+                echo "$RESP" | tee -a "downloads/${NAME}-resolve.log"
+                STATUS=$(echo "$RESP" | jq -r '.status // empty')
+                DL=$(echo "$RESP" | jq -r '.url // empty')
+                if [ "$STATUS" = "tunnel" ] || [ "$STATUS" = "redirect" ]; then
+                  if [ -n "$DL" ]; then
+                    echo "Downloading resolved URL: $DL" | tee -a "downloads/${NAME}-resolve.log"
+                    curl -L --fail --retry 4 --retry-delay 2 -o "$OUT" "$DL" 2>&1 | tee -a "downloads/${NAME}-download.log"
+                    if [ -f "$OUT" ] && [ $(stat -c%s "$OUT") -gt 10000000 ]; then
+                      return 0
+                    fi
+                    rm -f "$OUT"
+                  fi
+                fi
+              done
+            done
+            docker logs cobalt > "downloads/${NAME}-docker.log" 2>&1 || true
+            return 1
+          }
+
+          try_cobalt '' default || \
+          try_cobalt 'IOS' ios || \
+          try_cobalt 'ANDROID_VR' android_vr || \
+          try_cobalt 'WEB_EMBEDDED' web_embedded
+          RC=$?
+
+          docker logs cobalt > downloads/cobalt-final-docker.log 2>&1 || true
+          docker rm -f cobalt >/dev/null 2>&1 || true
+
+          if [ "$RC" -eq 0 ] && [ -f "$OUT" ] && [ $(stat -c%s "$OUT") -gt 10000000 ]; then
+            ffprobe -v error -show_entries format=duration,size:stream=codec_name,width,height,r_frame_rate -of json "$OUT" | tee downloads/ffprobe.json
+            SIZE=$(stat -c%s "$OUT")
+            echo "video size: $SIZE" | tee downloads/status.txt
+            if [ "$SIZE" -gt 1700000000 ]; then
+              mkdir -p downloads/split
+              split -b 1600M -d -a 2 "$OUT" downloads/split/video.part-
+              sha256sum "$OUT" > downloads/original.sha256
+              rm -f "$OUT"
+            fi
+            exit 0
+          fi
+          echo 'Cobalt attempts failed' | tee downloads/status.txt
+          exit 1
+
+      - name: Upload result and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-cobalt-result
+          path: |
+            downloads/*.mp4
+            downloads/*.json
+            downloads/*.txt
+            downloads/*.log
+            downloads/*.sha256
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Upload split part 00
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-cobalt-part00
+          path: downloads/split/video.part-00
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Upload split part 01
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-cobalt-part01
+          path: downloads/split/video.part-01
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Upload split part 02
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-cobalt-part02
+          path: downloads/split/video.part-02
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Upload split part 03
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-cobalt-part03
+          path: downloads/split/video.part-03
+          if-no-files-found: ignore
+          retention-days: 1
