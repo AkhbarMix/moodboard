@@ -1,0 +1,221 @@
+name: Temporary YouTube Proxy Download
+
+on:
+  push:
+    paths:
+      - '.github/workflows/youtube-proxy-download-temp.yml'
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg jq
+          python3 -m pip install --upgrade requests curl_cffi
+
+      - name: Resolve via public YouTube frontends and download
+        shell: bash
+        run: |
+          mkdir -p downloads
+          cat > /tmp/fetch_video.py <<'PY'
+          import json, os, sys, subprocess, time
+          from urllib.parse import urlencode
+          from curl_cffi import requests
+
+          VIDEO_ID = 'GkdzNxLOnYI'
+          OUT = 'downloads/Mix3D_Stylized_VFX_Livestream_Part1.mp4'
+          UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36'
+          s = requests.Session(impersonate='chrome')
+
+          def run(cmd, timeout=7200):
+              print('RUN:', ' '.join(cmd), flush=True)
+              return subprocess.run(cmd, timeout=timeout).returncode
+
+          def valid(path):
+              return os.path.exists(path) and os.path.getsize(path) > 10_000_000
+
+          piped = [
+              'https://pipedapi.kavin.rocks',
+              'https://pipedapi.leptons.xyz',
+              'https://pipedapi.nosebs.ru',
+              'https://pipedapi.syncpundit.io',
+              'https://api-piped.mha.fi',
+              'https://piped-api.garudalinux.org',
+          ]
+
+          for api in piped:
+              try:
+                  print('\n=== PIPED', api, '===', flush=True)
+                  r = s.get(f'{api}/streams/{VIDEO_ID}', timeout=45, headers={'User-Agent': UA})
+                  print('status', r.status_code, 'type', r.headers.get('content-type'), 'bytes', len(r.content), flush=True)
+                  if r.status_code != 200:
+                      continue
+                  data = r.json()
+                  open('downloads/piped_last.json','w').write(json.dumps(data, indent=2)[:5_000_000])
+                  videos = data.get('videoStreams') or []
+                  audios = data.get('audioStreams') or []
+                  def h(v):
+                      q = str(v.get('quality') or '').lower().replace('p','')
+                      try: return int(''.join(c for c in q if c.isdigit()) or 0)
+                      except: return 0
+                  candidates = [v for v in videos if v.get('url') and h(v) <= 1080]
+                  candidates.sort(key=lambda v: (h(v), int(v.get('bitrate') or 0)), reverse=True)
+                  audios = [a for a in audios if a.get('url')]
+                  audios.sort(key=lambda a: int(a.get('bitrate') or 0), reverse=True)
+                  if candidates and audios:
+                      v = candidates[0]; a = audios[0]
+                      print('video', h(v), v.get('codec'), v.get('format'), flush=True)
+                      print('audio', a.get('bitrate'), a.get('codec'), a.get('format'), flush=True)
+                      vr = s.get(v['url'], timeout=120, headers={'User-Agent': UA, 'Referer': api + '/'}, stream=True)
+                      print('video fetch', vr.status_code, vr.headers.get('content-type'), flush=True)
+                      if vr.status_code == 200:
+                          with open('/tmp/video.bin','wb') as f:
+                              for chunk in vr.iter_content(chunk_size=1024*1024):
+                                  if chunk: f.write(chunk)
+                      ar = s.get(a['url'], timeout=120, headers={'User-Agent': UA, 'Referer': api + '/'}, stream=True)
+                      print('audio fetch', ar.status_code, ar.headers.get('content-type'), flush=True)
+                      if ar.status_code == 200:
+                          with open('/tmp/audio.bin','wb') as f:
+                              for chunk in ar.iter_content(chunk_size=1024*1024):
+                                  if chunk: f.write(chunk)
+                      if os.path.exists('/tmp/video.bin') and os.path.getsize('/tmp/video.bin') > 1_000_000 and os.path.exists('/tmp/audio.bin') and os.path.getsize('/tmp/audio.bin') > 100_000:
+                          if run(['ffmpeg','-y','-i','/tmp/video.bin','-i','/tmp/audio.bin','-map','0:v:0','-map','1:a:0','-c','copy','-movflags','+faststart',OUT]) == 0 and valid(OUT):
+                              print('SUCCESS via Piped', api, flush=True)
+                              sys.exit(0)
+                  hls = data.get('hls')
+                  if hls:
+                      print('Trying HLS', flush=True)
+                      if run(['ffmpeg','-y','-headers',f'User-Agent: {UA}\r\nReferer: {api}/\r\n','-i',hls,'-c','copy','-movflags','+faststart',OUT]) == 0 and valid(OUT):
+                          print('SUCCESS via Piped HLS', api, flush=True)
+                          sys.exit(0)
+              except Exception as e:
+                  print('Piped failed:', repr(e), flush=True)
+
+          invidious = [
+              'https://inv.nadeko.net',
+              'https://invidious.nerdvpn.de',
+              'https://yt.chocolatemoo53.com',
+              'https://invidious.tiekoetter.com',
+              'https://yewtu.be',
+              'https://invidious.private.coffee',
+          ]
+          for base in invidious:
+              try:
+                  print('\n=== INVIDIOUS', base, '===', flush=True)
+                  r = s.get(f'{base}/api/v1/videos/{VIDEO_ID}', timeout=45, headers={'User-Agent': UA})
+                  print('status', r.status_code, 'type', r.headers.get('content-type'), 'bytes', len(r.content), flush=True)
+                  if r.status_code != 200:
+                      continue
+                  d = r.json()
+                  open('downloads/invidious_last.json','w').write(json.dumps(d, indent=2)[:5_000_000])
+                  # Try combined format streams first (typically 720p with audio)
+                  fmts = d.get('formatStreams') or []
+                  def height(x):
+                      try: return int(x.get('height') or str(x.get('qualityLabel','')).split('p')[0] or 0)
+                      except: return 0
+                  fmts = [x for x in fmts if x.get('url') and height(x) <= 1080]
+                  fmts.sort(key=height, reverse=True)
+                  for x in fmts[:3]:
+                      url = x['url']
+                      rr = s.get(url, timeout=120, headers={'User-Agent': UA, 'Referer': base + '/'}, stream=True)
+                      print('combined', height(x), rr.status_code, rr.headers.get('content-type'), flush=True)
+                      if rr.status_code == 200:
+                          with open(OUT,'wb') as f:
+                              for chunk in rr.iter_content(chunk_size=1024*1024):
+                                  if chunk: f.write(chunk)
+                          if valid(OUT):
+                              print('SUCCESS via Invidious formatStream', base, flush=True)
+                              sys.exit(0)
+                          try: os.remove(OUT)
+                          except: pass
+                  # Try instance local proxy latest_version endpoint with common itags
+                  for itag in ('22','18'):
+                      url = f'{base}/latest_version?id={VIDEO_ID}&itag={itag}&local=true'
+                      rr = s.get(url, timeout=120, headers={'User-Agent': UA, 'Referer': base + '/'}, allow_redirects=True, stream=True)
+                      print('local proxy itag', itag, rr.status_code, rr.url, rr.headers.get('content-type'), flush=True)
+                      if rr.status_code == 200:
+                          with open(OUT,'wb') as f:
+                              for chunk in rr.iter_content(chunk_size=1024*1024):
+                                  if chunk: f.write(chunk)
+                          if valid(OUT):
+                              print('SUCCESS via Invidious local proxy', base, itag, flush=True)
+                              sys.exit(0)
+                          try: os.remove(OUT)
+                          except: pass
+              except Exception as e:
+                  print('Invidious failed:', repr(e), flush=True)
+
+          print('All proxy methods failed', flush=True)
+          sys.exit(1)
+          PY
+          python3 /tmp/fetch_video.py 2>&1 | tee downloads/proxy-download.log
+
+          VIDEO='downloads/Mix3D_Stylized_VFX_Livestream_Part1.mp4'
+          if [ -f "$VIDEO" ] && [ $(stat -c%s "$VIDEO") -gt 10000000 ]; then
+            ffprobe -v error -show_entries format=duration,size:stream=codec_name,width,height,r_frame_rate -of json "$VIDEO" | tee downloads/ffprobe.json
+            SIZE=$(stat -c%s "$VIDEO")
+            if [ "$SIZE" -gt 1700000000 ]; then
+              mkdir -p downloads/split
+              split -b 1600M -d -a 2 "$VIDEO" downloads/split/video.part-
+              sha256sum "$VIDEO" > downloads/original.sha256
+              rm -f "$VIDEO"
+            fi
+          else
+            exit 1
+          fi
+
+      - name: Upload direct result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-proxy-result
+          path: |
+            downloads/*.mp4
+            downloads/*.json
+            downloads/*.txt
+            downloads/*.log
+            downloads/*.sha256
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Upload split part 00
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-proxy-part00
+          path: downloads/split/video.part-00
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Upload split part 01
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-proxy-part01
+          path: downloads/split/video.part-01
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Upload split part 02
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-proxy-part02
+          path: downloads/split/video.part-02
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Upload split part 03
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-vfx-proxy-part03
+          path: downloads/split/video.part-03
+          if-no-files-found: ignore
+          retention-days: 1
