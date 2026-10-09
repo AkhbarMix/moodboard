@@ -28,7 +28,7 @@ jobs:
           for client in default visionos tv web; do
             opts=()
             if [ "$client" != default ]; then opts+=(--extractor-args "youtube:player_client=$client"); fi
-            if timeout 220 yt-dlp --js-runtimes node --remote-components ejs:github --impersonate chrome --live-from-start --socket-timeout 15 --retries 1 --extractor-retries 1 --fragment-retries 2 --concurrent-fragments 8 --no-playlist -f 'bv*[height<=1080]+ba/b[height<=1080]' --merge-output-format mp4 -o output/Mix3D_Small_Environment_Source.%(ext)s "${opts[@]}" 'https://www.youtube.com/watch?v=rfPn550bm9E' > "output/download-$client.log" 2>&1; then
+            if timeout 220 yt-dlp --js-runtimes node --remote-components ejs:github --impersonate chrome --live-from-start --socket-timeout 15 --retries 1 --extractor-retries 1 --fragment-retries 2 --concurrent-fragments 8 --no-playlist -f 'bv*[height<=1080]+ba/b[height<=1080]' --merge-output-format mp4 -o 'output/Mix3D_Small_Environment_Source.%(ext)s' "${opts[@]}" 'https://www.youtube.com/watch?v=rfPn550bm9E' > "output/download-$client.log" 2>&1; then
               if ffprobe -v error -show_entries format=duration,size -of json output/Mix3D_Small_Environment_Source.mp4 > output/verification.json; then
                 exit 0
               fi
