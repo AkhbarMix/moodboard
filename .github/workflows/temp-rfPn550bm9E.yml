@@ -1,0 +1,44 @@
+name: Temporary Mix3D source download
+on:
+  push:
+    branches: [temp-download-rfPn550bm9E-20261009]
+    paths: [.github/workflows/temp-rfPn550bm9E.yml]
+permissions:
+  contents: read
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install downloader and FFmpeg
+        run: |
+          python -m pip install -U --pre 'yt-dlp[default,curl-cffi]'
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+      - name: Download source
+        shell: bash
+        run: |
+          mkdir -p output
+          for client in default visionos tv web; do
+            opts=()
+            if [ "$client" != default ]; then opts+=(--extractor-args "youtube:player_client=$client"); fi
+            if timeout 220 yt-dlp --js-runtimes node --remote-components ejs:github --impersonate chrome --live-from-start --socket-timeout 15 --retries 1 --extractor-retries 1 --fragment-retries 2 --concurrent-fragments 8 --no-playlist -f 'bv*[height<=1080]+ba/b[height<=1080]' --merge-output-format mp4 -o output/Mix3D_Small_Environment_Source.%(ext)s "${opts[@]}" 'https://www.youtube.com/watch?v=rfPn550bm9E' > "output/download-$client.log" 2>&1; then
+              if ffprobe -v error -show_entries format=duration,size -of json output/Mix3D_Small_Environment_Source.mp4 > output/verification.json; then
+                exit 0
+              fi
+            fi
+          done
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mix3d-small-environment-source
+          path: output/
+          retention-days: 2
+          compression-level: 0
